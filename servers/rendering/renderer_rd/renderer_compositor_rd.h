@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/io/image.h"
+#include "modules/modules_enabled.gen.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -44,6 +45,10 @@
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/utilities.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+
+#ifdef MODULE_FRAMEGEN_ENABLED
+#include "modules/framegen/framegen_present_bridge.h"
+#endif
 
 class RendererCompositorRD : public RendererCompositor {
 protected:
@@ -105,6 +110,12 @@ protected:
 	} blit;
 
 	HashMap<RID, RID> render_target_descriptors;
+
+#ifdef MODULE_FRAMEGEN_ENABLED
+	RID framegen_present_texture;
+	RID framegen_present_rd_texture;
+	bool framegen_present_gen_next = false;
+#endif
 
 	double time = 0.0;
 	double delta = 0.0;

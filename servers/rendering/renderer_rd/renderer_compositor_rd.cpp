@@ -45,6 +45,36 @@ void RendererCompositorRD::blit_render_targets_to_screen(DisplayServer::WindowID
 
 	BlitPipelines blit_pipelines = _get_blit_pipelines_for_format(RD::get_singleton()->screen_get_framebuffer_format(p_screen));
 
+#ifdef MODULE_FRAMEGEN_ENABLED
+	RID framegen_override_rd_texture;
+	if (p_screen == DisplayServer::MAIN_WINDOW_ID && framegen_present_gen_next) {
+		Ref<Image> generated_image;
+		if (framegen_consume_latest_present_frame(generated_image)) {
+			// Draw a magenta border around the generated image for debugging purposes.
+			if (generated_image.is_valid() && !generated_image->is_empty()) {
+				const int marker_w = MIN(96, generated_image->get_width());
+				const int marker_h = MIN(96, generated_image->get_height());
+				generated_image->fill_rect(Rect2i(0, 0, marker_w, marker_h), Color(1.0f, 0.0f, 1.0f, 1.0f));
+				const int inner_w = MAX(0, MIN(64, generated_image->get_width() - 16));
+				const int inner_h = MAX(0, MIN(64, generated_image->get_height() - 16));
+				generated_image->fill_rect(Rect2i(16, 16, inner_w, inner_h), Color(1.0f, 1.0f, 1.0f, 1.0f));
+			}
+
+			if (framegen_present_texture.is_null()) {
+				framegen_present_texture = texture_storage->texture_allocate();
+				texture_storage->texture_2d_initialize(framegen_present_texture, generated_image);
+				framegen_present_rd_texture = texture_storage->texture_get_rd_texture(framegen_present_texture, false);
+			} else {
+				texture_storage->texture_2d_update(framegen_present_texture, generated_image);
+			}
+		}
+
+		if (framegen_present_rd_texture.is_valid()) {
+			framegen_override_rd_texture = framegen_present_rd_texture;
+		}
+	}
+#endif
+
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin_for_screen(p_screen);
 	ERR_FAIL_COND(draw_list == RD::INVALID_ID);
 
@@ -56,6 +86,13 @@ void RendererCompositorRD::blit_render_targets_to_screen(DisplayServer::WindowID
 
 	for (int i = 0; i < p_amount; i++) {
 		RID rd_texture = texture_storage->render_target_get_rd_texture(p_render_targets[i].render_target);
+
+#ifdef MODULE_FRAMEGEN_ENABLED
+		if (p_screen == DisplayServer::MAIN_WINDOW_ID && i == 0 && framegen_override_rd_texture.is_valid()) {
+			rd_texture = framegen_override_rd_texture;
+		}
+#endif
+
 		ERR_CONTINUE(rd_texture.is_null());
 
 		HashMap<RID, RID>::Iterator it = render_target_descriptors.find(rd_texture);
@@ -130,6 +167,12 @@ void RendererCompositorRD::begin_frame(double frame_step) {
 }
 
 void RendererCompositorRD::end_frame(bool p_present) {
+#ifdef MODULE_FRAMEGEN_ENABLED
+	if (p_present) {
+		framegen_present_gen_next = !framegen_present_gen_next;
+	}
+#endif
+
 	RD::get_singleton()->swap_buffers(p_present);
 }
 
@@ -168,6 +211,14 @@ void RendererCompositorRD::initialize() {
 uint64_t RendererCompositorRD::frame = 1;
 
 void RendererCompositorRD::finalize() {
+#ifdef MODULE_FRAMEGEN_ENABLED
+	if (framegen_present_texture.is_valid()) {
+		texture_storage->texture_free(framegen_present_texture);
+		framegen_present_texture = RID();
+		framegen_present_rd_texture = RID();
+	}
+#endif
+
 	texture_storage->_tex_blit_shader_free();
 	memdelete(scene);
 	memdelete(canvas);
