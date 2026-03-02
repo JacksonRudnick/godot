@@ -1,0 +1,14 @@
+Import('env')
+
+env_framegen = env.Clone()
+env_framegen.add_source_files(env.modules_sources, "*.cpp")
+
+env_framegen.Append(CXXFLAGS=['-isystem', Dir('libtorch/include/').abspath])
+env_framegen.Append(CXXFLAGS=['-isystem', Dir('libtorch/include/torch/csrc/api/include/').abspath])
+env_framegen.Append(CXXFLAGS=['-fexceptions', '-frtti'])
+
+libtorch_lib_path = Dir('libtorch/lib/').abspath
+
+env.Append(LIBPATH=[libtorch_lib_path])
+env.Append(LIBS=['torch', 'torch_cpu', 'c10', 'torch_hip', 'c10_hip', 'torch_global_deps'])
+env.Append(LINKFLAGS=['-Wl,-rpath,' + libtorch_lib_path])
