@@ -45,7 +45,6 @@
 #include "servers/display/display_server.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
-#include "servers/rendering/rendering_server.h"
 
 #ifdef XAUDIO2_ENABLED
 #include "drivers/xaudio2/audio_driver_xaudio2.h"
@@ -59,8 +58,6 @@
 #include "gl_manager_windows_angle.h"
 #include "gl_manager_windows_native.h"
 #endif // GLES3_ENABLED
-
-#include "native_menu_windows.h"
 
 #include <io.h>
 #include <cstdio>
@@ -192,6 +189,7 @@ typedef struct {
 } ICONDIR, *LPICONDIR;
 
 class DropTargetWindows;
+class NativeMenuWindows;
 
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011

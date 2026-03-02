@@ -37,6 +37,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/object/class_db.h"
 #include "core/profiling/profiling.h"
 #include "core/templates/fixed_vector.h"
 #include "modules/modules_enabled.gen.h"
@@ -2200,6 +2201,14 @@ uint32_t RenderingDevice::_texture_vrs_method_to_usage_bits() const {
 			return RDD::TEXTURE_USAGE_VRS_FRAGMENT_DENSITY_MAP_BIT;
 		default:
 			return 0;
+	}
+}
+
+void RenderingDevice::_texture_ensure_shareable_format(RID p_texture, const DataFormat &p_shareable_format) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL(texture);
+	if (!texture->allowed_shared_formats.has(p_shareable_format)) {
+		texture->allowed_shared_formats.push_back(p_shareable_format);
 	}
 }
 
@@ -6540,7 +6549,7 @@ RenderingDevice::TransferWorker *RenderingDevice::_acquire_transfer_worker(uint3
 				driver->buffer_free(transfer_worker->staging_buffer);
 			}
 
-			uint32_t new_staging_buffer_size = next_power_of_2(expected_buffer_size);
+			uint32_t new_staging_buffer_size = Math::next_power_of_2(expected_buffer_size);
 			transfer_worker->staging_buffer_size_allocated = new_staging_buffer_size;
 			transfer_worker->staging_buffer = driver->buffer_create(new_staging_buffer_size, RDD::BUFFER_USAGE_TRANSFER_FROM_BIT, RDD::MEMORY_ALLOCATION_TYPE_CPU, frames_drawn);
 		}
@@ -7807,10 +7816,10 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	download_staging_buffers.max_size = upload_staging_buffers.max_size;
 
 	texture_upload_region_size_px = GLOBAL_GET("rendering/rendering_device/staging_buffer/texture_upload_region_size_px");
-	texture_upload_region_size_px = nearest_power_of_2_templated(texture_upload_region_size_px);
+	texture_upload_region_size_px = Math::nearest_power_of_2_templated(texture_upload_region_size_px);
 
 	texture_download_region_size_px = GLOBAL_GET("rendering/rendering_device/staging_buffer/texture_download_region_size_px");
-	texture_download_region_size_px = nearest_power_of_2_templated(texture_download_region_size_px);
+	texture_download_region_size_px = Math::nearest_power_of_2_templated(texture_download_region_size_px);
 
 	// Ensure current staging block is valid and at least one per frame exists.
 	upload_staging_buffers.current = 0;
