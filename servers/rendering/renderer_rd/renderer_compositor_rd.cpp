@@ -36,6 +36,14 @@
 #include "servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.h"
 #include "servers/rendering/rendering_server_types.h"
 
+#ifdef MODULE_FRAMEGEN_ENABLED
+static FramegenConsumeLatestPresentFrameCallback framegen_consume_latest_present_frame_callback = nullptr;
+
+void renderer_compositor_rd_set_framegen_consume_callback(FramegenConsumeLatestPresentFrameCallback p_callback) {
+	framegen_consume_latest_present_frame_callback = p_callback;
+}
+#endif
+
 void RendererCompositorRD::blit_render_targets_to_screen(DisplayServer::WindowID p_screen, const RenderingServerTypes::BlitToScreen *p_render_targets, int p_amount) {
 	Error err = RD::get_singleton()->screen_prepare_for_drawing(p_screen);
 	if (err != OK) {
@@ -49,7 +57,8 @@ void RendererCompositorRD::blit_render_targets_to_screen(DisplayServer::WindowID
 	RID framegen_override_rd_texture;
 	if (p_screen == DisplayServer::MAIN_WINDOW_ID && framegen_present_gen_next) {
 		Ref<Image> generated_image;
-		if (framegen_consume_latest_present_frame(generated_image)) {
+		if (framegen_consume_latest_present_frame_callback && framegen_consume_latest_present_frame_callback(generated_image)) {
+			
 			// Draw a magenta border around the generated image for debugging purposes.
 			if (generated_image.is_valid() && !generated_image->is_empty()) {
 				const int marker_w = MIN(96, generated_image->get_width());

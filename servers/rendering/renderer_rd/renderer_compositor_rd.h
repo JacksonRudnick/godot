@@ -47,7 +47,8 @@
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
 #ifdef MODULE_FRAMEGEN_ENABLED
-#include "modules/framegen/framegen_present_bridge.h"
+using FramegenConsumeLatestPresentFrameCallback = bool (*)(Ref<Image> &);
+void renderer_compositor_rd_set_framegen_consume_callback(FramegenConsumeLatestPresentFrameCallback p_callback);
 #endif
 
 class RendererCompositorRD : public RendererCompositor {
