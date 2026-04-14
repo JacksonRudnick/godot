@@ -18,18 +18,29 @@ private:
 	static constexpr int INPUT_WIDTH = 640;
 	static constexpr int INPUT_HEIGHT = 360;
 	static constexpr int INPUT_CHANNELS = 3;
-	static constexpr int PLAYER_INPUT_FEATURES = 18;
+	static constexpr int PLAYER_INPUT_FEATURES = 19;
 
 	torch::jit::script::Module module;
 	bool module_loaded = false;
 	torch::Device device = torch::kCPU;
 	torch::ScalarType inference_dtype = torch::kFloat32;
-	torch::Tensor input_tensor;
-	torch::Tensor player_input_tensor;
+
+	// current frame buffers
 	torch::Tensor input_staging_u8;
+	torch::Tensor input_tensor;
+
+	// previous frame buffers
+	torch::Tensor input_staging_u8_prev;
+	torch::Tensor input_tensor_prev;
+	bool has_prev_frame = false;
+
 	torch::Tensor player_input_staging;
+	torch::Tensor player_input_tensor;
+
 	Vector<uint8_t> output_buffer;
 	std::vector<torch::jit::IValue> forward_inputs;
+
+	// worker thread
 	std::thread worker_thread;
 	std::condition_variable worker_cv;
 	mutable std::mutex worker_mutex;
@@ -38,21 +49,25 @@ private:
 	bool worker_stop_requested = false;
 	bool worker_has_job = false;
 	bool worker_has_ready_frame = false;
+
+	// worker stores two frames
 	Ref<Image> worker_pending_frame;
+	Ref<Image> worker_pending_frame_prev;
 	Dictionary worker_pending_input;
 	Ref<Image> worker_ready_frame;
 
+	static std::mutex present_frame_mutex;
+	static Ref<Image> latest_present_frame;
+
 	void _ensure_static_buffers();
-	Ref<Image> _run_inference(const Ref<Image> &f_t, Dictionary inp_t);
+	Ref<Image> _run_inference(const Ref<Image> &f_t_prev, const Ref<Image> &f_t, Dictionary inp_t);
 	void _worker_loop();
 	void _start_worker();
 	void _stop_worker();
 	static void _publish_present_frame(const Ref<Image> &p_img);
-	static std::mutex present_frame_mutex;
-	static Ref<Image> latest_present_frame;
 
 	torch::Tensor _process_player_inputs(Dictionary inp_t);
-	torch::Tensor _process_input_frame(const Ref<Image> &f_t);
+	torch::Tensor _process_input_frame(const Ref<Image> &f_t, torch::Tensor &staging, torch::Tensor &out_tensor);
 
 protected:
 	static void _bind_methods();

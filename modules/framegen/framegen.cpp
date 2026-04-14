@@ -1,5 +1,4 @@
 #include "framegen.h"
-
 #include "core/object/class_db.h"
 #include <cstring>
 
@@ -15,12 +14,20 @@ void Framegen::_ensure_static_buffers() {
 		input_staging_u8 = torch::empty({ INPUT_HEIGHT, INPUT_WIDTH, INPUT_CHANNELS }, torch::dtype(torch::kUInt8).device(torch::kCPU));
 	}
 
+	if (!input_staging_u8_prev.defined()) {
+		input_staging_u8_prev = torch::empty({ INPUT_HEIGHT, INPUT_WIDTH, INPUT_CHANNELS }, torch::dtype(torch::kUInt8).device(torch::kCPU));
+	}
+
 	if (!player_input_staging.defined()) {
 		player_input_staging = torch::zeros({ 1, PLAYER_INPUT_FEATURES }, torch::dtype(torch::kFloat32).device(torch::kCPU));
 	}
 
 	if (!input_tensor.defined() || input_tensor.device() != device) {
 		input_tensor = torch::empty({ 1, INPUT_CHANNELS, INPUT_HEIGHT, INPUT_WIDTH }, torch::dtype(inference_dtype).device(device));
+	}
+
+	if (!input_tensor_prev.defined() || input_tensor_prev.device() != device) {
+		input_tensor_prev = torch::empty({ 1, INPUT_CHANNELS, INPUT_HEIGHT, INPUT_WIDTH }, torch::dtype(inference_dtype).device(device));
 	}
 
 	if (!player_input_tensor.defined() || player_input_tensor.device() != device) {
@@ -31,19 +38,22 @@ void Framegen::_ensure_static_buffers() {
 		input_tensor = input_tensor.to(inference_dtype);
 	}
 
+	if (input_tensor_prev.scalar_type() != inference_dtype) {
+		input_tensor_prev = input_tensor_prev.to(inference_dtype);
+	}
+
 	if (player_input_tensor.scalar_type() != inference_dtype) {
 		player_input_tensor = player_input_tensor.to(inference_dtype);
 	}
 
 	forward_inputs.clear();
-	forward_inputs.reserve(2);
+	forward_inputs.reserve(3);
 }
 
 void Framegen::_publish_present_frame(const Ref<Image> &p_img) {
 	if (p_img.is_null()) {
 		return;
 	}
-
 	std::lock_guard<std::mutex> lock(present_frame_mutex);
 	latest_present_frame = p_img;
 }
@@ -54,7 +64,6 @@ bool Framegen::consume_latest_present_frame(Ref<Image> &r_img) {
 		r_img.unref();
 		return false;
 	}
-
 	r_img = latest_present_frame;
 	latest_present_frame.unref();
 	return true;
@@ -65,7 +74,6 @@ void Framegen::_start_worker() {
 	if (worker_running) {
 		return;
 	}
-
 	worker_stop_requested = false;
 	worker_has_job = false;
 	worker_has_ready_frame = false;
@@ -92,12 +100,14 @@ void Framegen::_stop_worker() {
 	worker_has_job = false;
 	worker_has_ready_frame = false;
 	worker_pending_frame.unref();
+	worker_pending_frame_prev.unref();
 	worker_ready_frame.unref();
 }
 
 void Framegen::_worker_loop() {
 	while (true) {
 		Ref<Image> job_frame;
+		Ref<Image> job_frame_prev;
 		Dictionary job_input;
 
 		{
@@ -109,18 +119,19 @@ void Framegen::_worker_loop() {
 			}
 
 			job_frame = worker_pending_frame;
+			job_frame_prev = worker_pending_frame_prev;
 			job_input = worker_pending_input;
 			worker_has_job = false;
 		}
 
-		if (job_frame.is_null()) {
+		if (job_frame.is_null() || job_frame_prev.is_null()) {
 			continue;
 		}
 
 		Ref<Image> generated;
 		{
 			std::lock_guard<std::mutex> infer_lock(inference_mutex);
-			generated = _run_inference(job_frame, job_input);
+			generated = _run_inference(job_frame_prev, job_frame, job_input);
 		}
 
 		std::lock_guard<std::mutex> lock(worker_mutex);
@@ -149,6 +160,7 @@ bool Framegen::load_module(const String &p_path) {
 		module.eval();
 		_ensure_static_buffers();
 		module_loaded = true;
+		has_prev_frame = false;
 		_start_worker();
 		return true;
 	} catch (const c10::Error &e) {
@@ -196,6 +208,8 @@ torch::Tensor Framegen::_process_player_inputs(Dictionary inp_t) {
 	float m1 = (float)input_dict.get("m1", 0);
 	float space = (float)input_dict.get("space", 0);
 
+	float delta_time = (float)inp_t.get("delta", 0.0f);
+
 	float *player_ptr = player_input_staging.data_ptr<float>();
 	player_ptr[0] = a;
 	player_ptr[1] = d;
@@ -215,6 +229,7 @@ torch::Tensor Framegen::_process_player_inputs(Dictionary inp_t) {
 	player_ptr[15] = cam_up_x;
 	player_ptr[16] = cam_up_y;
 	player_ptr[17] = cam_up_z;
+	player_ptr[18] = delta_time;
 
 	player_input_tensor.copy_(player_input_staging.to(device, inference_dtype));
 
@@ -226,13 +241,11 @@ torch::Tensor Framegen::_process_player_inputs(Dictionary inp_t) {
 	}
 }
 
-torch::Tensor Framegen::_process_input_frame(const Ref<Image> &f_t) {
+torch::Tensor Framegen::_process_input_frame(const Ref<Image> &f_t, torch::Tensor &staging, torch::Tensor &out_tensor) {
 	if (!module_loaded) {
 		print_error("Module not loaded.");
 		return torch::Tensor();
 	}
-
-	_ensure_static_buffers();
 
 	if (f_t.is_null()) {
 		print_error("Input frame is null.");
@@ -241,52 +254,51 @@ torch::Tensor Framegen::_process_input_frame(const Ref<Image> &f_t) {
 
 	Ref<Image> img = f_t->duplicate();
 
-	const int expected_width = INPUT_WIDTH;
-	const int expected_height = INPUT_HEIGHT;
-	if (img->get_width() != expected_width || img->get_height() != expected_height) {
-		img->resize(expected_width, expected_height, Image::INTERPOLATE_BILINEAR);
+	if (img->get_width() != INPUT_WIDTH || img->get_height() != INPUT_HEIGHT) {
+		img->resize(INPUT_WIDTH, INPUT_HEIGHT, Image::INTERPOLATE_BILINEAR);
 	}
 
-	img->convert(Image::FORMAT_RGB8); // force 3 channels to match Python reshape(..., 3)
+	img->convert(Image::FORMAT_RGB8);
 
-	PackedByteArray bytes = img->get_data(); // raw uint8 buffer, like np.fromfile(..., uint8)
+	PackedByteArray bytes = img->get_data();
 	const int64_t expected_size = (int64_t)INPUT_HEIGHT * INPUT_WIDTH * INPUT_CHANNELS;
 	if (bytes.size() != expected_size) {
 		print_error("Unexpected input frame byte size.");
 		return torch::Tensor();
 	}
 
-	memcpy(input_staging_u8.data_ptr<uint8_t>(), bytes.ptr(), (size_t)expected_size);
+	memcpy(staging.data_ptr<uint8_t>(), bytes.ptr(), (size_t)expected_size);
 
-	torch::Tensor normalized = input_staging_u8.to(torch::kFloat32)
+	torch::Tensor normalized = staging.to(torch::kFloat32)
 									   .div_(255.0f)
 									   .permute({ 2, 0, 1 })
 									   .unsqueeze(0)
 									   .contiguous();
 
-	input_tensor.copy_(normalized.to(device, inference_dtype));
+	out_tensor.copy_(normalized.to(device, inference_dtype));
 
 	try {
-		return input_tensor;
+		return out_tensor;
 	} catch (const c10::Error &e) {
 		print_error("Error processing input frame: " + String(e.what()));
 		return torch::Tensor();
 	}
 }
 
-Ref<Image> Framegen::_run_inference(const Ref<Image> &f_t, Dictionary inp_t) {
+Ref<Image> Framegen::_run_inference(const Ref<Image> &f_t_prev, const Ref<Image> &f_t, Dictionary inp_t) {
 	if (!module_loaded) {
 		print_error("Module not loaded.");
 		return Ref<Image>();
 	}
 
-	input_tensor = _process_input_frame(f_t);
+	input_tensor_prev = _process_input_frame(f_t_prev, input_staging_u8_prev, input_tensor_prev);
+	input_tensor = _process_input_frame(f_t, input_staging_u8, input_tensor);
 	player_input_tensor = _process_player_inputs(inp_t);
 
-	//int original_width = f_t->get_width();
-	//int original_height = f_t->get_height();
+	int original_width = f_t->get_width();
+	int original_height = f_t->get_height();
 
-	if (!input_tensor.defined() || !player_input_tensor.defined()) {
+	if (!input_tensor_prev.defined() || !input_tensor.defined() || !player_input_tensor.defined()) {
 		print_error("Error processing inputs.");
 		return Ref<Image>();
 	}
@@ -294,10 +306,20 @@ Ref<Image> Framegen::_run_inference(const Ref<Image> &f_t, Dictionary inp_t) {
 	try {
 		torch::InferenceMode inference_mode;
 		forward_inputs.clear();
-		forward_inputs.push_back(input_tensor);
-		forward_inputs.push_back(player_input_tensor);
+		forward_inputs.push_back(input_tensor_prev); // f_t_minus_1
+		forward_inputs.push_back(input_tensor); // f_t
+		forward_inputs.push_back(player_input_tensor); // inputs
 
-		torch::Tensor output = module.forward(forward_inputs).toTensor();
+		auto output_tuple = module.forward(forward_inputs);
+
+		// model returns (pred, delta) tuple — we want pred
+		torch::Tensor output;
+		if (output_tuple.isTuple()) {
+			output = output_tuple.toTuple()->elements()[0].toTensor();
+		} else {
+			output = output_tuple.toTensor();
+		}
+
 		output = output.detach().to(torch::kCPU);
 
 		if (output.dim() == 4 && output.size(0) == 1) {
@@ -305,14 +327,14 @@ Ref<Image> Framegen::_run_inference(const Ref<Image> &f_t, Dictionary inp_t) {
 		}
 
 		if (output.dim() != 3) {
-			print_error("Output tensor must be 3D (CHW or HWC).");
+			print_error("Output tensor must be 3D.");
 			return Ref<Image>();
 		}
 
 		if (output.size(0) == 3) {
 			output = output.permute({ 1, 2, 0 });
 		} else if (output.size(2) != 3) {
-			print_error("Output tensor must have 3 channels (RGB).");
+			print_error("Output tensor must have 3 channels.");
 			return Ref<Image>();
 		}
 
@@ -323,21 +345,21 @@ Ref<Image> Framegen::_run_inference(const Ref<Image> &f_t, Dictionary inp_t) {
 		int channels = output.size(2);
 
 		if (channels != 3) {
-			print_error("Output tensor must have 3 channels (RGB).");
+			print_error("Output tensor must have 3 channels.");
 			return Ref<Image>();
 		}
 
-		torch::Tensor output_u8 = output.contiguous(); // ensure dense CPU layout
-		int64_t byte_count = output_u8.numel(); // H * W * 3 for RGB8
+		torch::Tensor output_u8 = output.contiguous();
+		int64_t byte_count = output_u8.numel();
 
 		output_buffer.resize(byte_count);
 		memcpy(output_buffer.ptrw(), output_u8.data_ptr<uint8_t>(), (size_t)byte_count);
 
 		Ref<Image> img = Image::create_from_data(width, height, false, Image::FORMAT_RGB8, output_buffer);
 
-		/*if (img->get_width() != original_width || img->get_height() != original_height) {
+		if (img->get_width() != original_width || img->get_height() != original_height) {
 			img->resize(original_width, original_height, Image::INTERPOLATE_BILINEAR);
-		}*/
+		}
 
 		_publish_present_frame(img);
 		return img;
@@ -352,7 +374,11 @@ Ref<Image> Framegen::_run_inference(const Ref<Image> &f_t, Dictionary inp_t) {
 
 Ref<Image> Framegen::generate_frame(const Ref<Image> &f_t, Dictionary inp_t) {
 	std::lock_guard<std::mutex> lock(inference_mutex);
-	return _run_inference(f_t, inp_t);
+	if (!has_prev_frame) {
+		// first frame — use f_t as both prev and current
+		return _run_inference(f_t, f_t, inp_t);
+	}
+	return _run_inference(worker_pending_frame_prev, f_t, inp_t);
 }
 
 bool Framegen::submit_frame(const Ref<Image> &f_t, Dictionary inp_t) {
@@ -375,6 +401,17 @@ bool Framegen::submit_frame(const Ref<Image> &f_t, Dictionary inp_t) {
 		if (!worker_running) {
 			return false;
 		}
+
+		// skip if no previous frame yet
+		if (!has_prev_frame) {
+			worker_pending_frame_prev = frame_copy;
+			worker_pending_frame = frame_copy;
+			has_prev_frame = true;
+			return false; // don't submit job yet
+		}
+
+		// current becomes previous, new frame becomes current
+		worker_pending_frame_prev = worker_pending_frame;
 		worker_pending_frame = frame_copy;
 		worker_pending_input = inp_t;
 		worker_has_job = true;
