@@ -49,6 +49,7 @@ private:
 	bool worker_stop_requested = false;
 	bool worker_has_job = false;
 	bool worker_has_ready_frame = false;
+	int inference_count = 0;
 
 	// worker stores two frames
 	Ref<Image> worker_pending_frame;

@@ -1,5 +1,6 @@
 #include "framegen.h"
 #include "core/object/class_db.h"
+#include <chrono>
 #include <cstring>
 
 std::mutex Framegen::present_frame_mutex;
@@ -128,10 +129,20 @@ void Framegen::_worker_loop() {
 			continue;
 		}
 
+		auto t0 = std::chrono::high_resolution_clock::now();
+
 		Ref<Image> generated;
 		{
 			std::lock_guard<std::mutex> infer_lock(inference_mutex);
 			generated = _run_inference(job_frame_prev, job_frame, job_input);
+		}
+
+		auto t1 = std::chrono::high_resolution_clock::now();
+		std::chrono::duration<double> elapsed = t1 - t0;
+
+		inference_count++;
+		if (inference_count % 30 == 0) {
+			print_line("Inference time: " + String::num(elapsed.count()) + " seconds");
 		}
 
 		std::lock_guard<std::mutex> lock(worker_mutex);
